@@ -51,6 +51,16 @@
       <input id="samples" type="number" min="1" max="10" value="2">
     </label>
     <div id="scanNote" class="hint"></div>
+    <label class="check"><input id="activeOn" type="checkbox" checked> วัดแบบ active ด้วย (link rate + ping)</label>
+    <div id="activeBox">
+      <label>Ping ไปที่ (เว้นว่าง = gateway)
+        <input id="pingHost" type="text" placeholder="เช่น 192.168.1.1">
+      </label>
+      <label>จำนวนครั้ง ping ต่อจุด
+        <input id="pingCount" type="number" min="2" max="30" value="8">
+      </label>
+      <div class="hint">ต้องเชื่อมต่อ Wi-Fi อยู่ — วัดค่าของ AP ที่เครื่องเกาะอยู่ ณ จุดนั้น</div>
+    </div>
   </section>
 
   <section>
@@ -62,11 +72,23 @@
         <option value="predicted">จำลองจาก AP ที่วางไว้</option>
       </select>
     </label>
-    <label>แสดงของ
+    <label>ค่าที่แสดงเป็นสี
+      <select id="hmMetric">
+        <option value="rssi">RSSI (passive)</option>
+        <option value="rate">Link rate (Mbps)</option>
+        <option value="latency">Latency (ms)</option>
+        <option value="jitter">Jitter (ms)</option>
+        <option value="loss">Packet loss (%)</option>
+      </select>
+    </label>
+    <label id="hmFilterBox">แสดงของ
       <select id="hmFilter"></select>
     </label>
-    <label>เกณฑ์ RSSI ที่ยอมรับได้ (dBm)
+    <label id="targetBox">เกณฑ์ RSSI ที่ยอมรับได้ (dBm)
       <input id="target" type="number" value="-67" min="-95" max="-30">
+    </label>
+    <label id="mTargetBox" hidden><span id="mTargetLbl"></span>
+      <input id="mTarget" type="number" step="any">
     </label>
     <label>ความโปร่งแสง
       <input id="opacity" type="range" min="10" max="100" value="65">
@@ -75,7 +97,7 @@
       <input id="plExp" type="number" step="0.1" min="2" max="5" value="3">
     </label>
     <div id="stats" class="stats"></div>
-    <div class="legend"><span>-90</span><i></i><span>-50 dBm</span></div>
+    <div class="legend"><span id="legLo">-90</span><i></i><span id="legHi">-50 dBm</span></div>
   </section>
 
   <section id="selPanel" hidden>

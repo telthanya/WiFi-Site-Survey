@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, report, scanner
+from . import __version__, active, report, scanner
 
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 60 * 1024 * 1024  # แปลนอาคาร + heatmap เป็นรูป base64
@@ -120,6 +120,14 @@ def make_handler(app: App):
                     with app.scan_lock:
                         try:
                             return self._json(200, {"aps": scanner.scan(samples)})
+                        except scanner.ScanError as e:
+                            return self._err(500, str(e))
+                if path == "/api/active":
+                    q = parse_qs(url.query)
+                    with app.scan_lock:
+                        try:
+                            return self._json(200, active.measure(q.get("host", [""])[0],
+                                                                  int(q.get("count", ["8"])[0])))
                         except scanner.ScanError as e:
                             return self._err(500, str(e))
                 m = re.match(r"^/api/projects/(.+)$", path)

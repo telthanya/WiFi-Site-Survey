@@ -33,6 +33,46 @@ function rssiColor(v) {
     }
   }
 }
+/* ตัวชี้วัดที่ใช้ระบายสี: rssi (passive) และค่าจากการวัด active (link rate / ping) */
+const METRICS = {
+  rssi:    { name: "RSSI", unit: "dBm", lo: -90, hi: -50, higher: true, target: -67, tl: "เกณฑ์ RSSI ที่ยอมรับได้ (dBm)" },
+  rate:    { name: "Link rate", unit: "Mbps", lo: 0, hi: 300, higher: true, target: 150, tl: "link rate ขั้นต่ำที่ยอมรับได้ (Mbps)" },
+  latency: { name: "Latency", unit: "ms", lo: 5, hi: 100, higher: false, target: 30, tl: "latency สูงสุดที่ยอมรับได้ (ms)" },
+  jitter:  { name: "Jitter", unit: "ms", lo: 0, hi: 30, higher: false, target: 10, tl: "jitter สูงสุดที่ยอมรับได้ (ms)" },
+  loss:    { name: "Packet loss", unit: "%", lo: 0, hi: 10, higher: false, target: 1, tl: "packet loss สูงสุดที่ยอมรับได้ (%)" },
+};
+const curMetric = () => ($("hmSource").value === "predicted" ? "rssi" : $("hmMetric").value);
+const curDef = () => METRICS[curMetric()];
+const curTarget = () => parseFloat(curMetric() === "rssi" ? $("target").value : $("mTarget").value);
+const passes = (v, t) => (curDef().higher ? v >= t : v <= t);
+function metricColor(v) {   // แปลงค่าเป็น 0..1 (แย่→ดี) แล้วใช้สีชุดเดียวกับ RSSI
+  const d = curDef();
+  let t = Math.max(0, Math.min(1, (v - d.lo) / (d.hi - d.lo)));
+  if (!d.higher) t = 1 - t;
+  return rssiColor(-90 + 40 * t);
+}
+const fmtVal = (v) => (Math.abs(v) >= 10 || curMetric() === "rssi" ? v.toFixed(0) : v.toFixed(1));
+function legendText() {     // [ข้อความซ้าย (แย่), ข้อความขวา (ดี)]
+  const d = curDef(), a = `${d.lo}`, b = `${d.hi} ${d.unit}`;
+  return d.higher ? [a, b] : [`${d.hi}`, `${d.lo} ${d.unit}`];
+}
+function activeValue(p, m) {
+  const a = p.active; if (!a) return null;
+  if (m === "rate") {
+    const r = [a.link && a.link.rx_rate, a.link && a.link.tx_rate].filter((x) => x != null);
+    return r.length ? r.reduce((x, y) => x + y, 0) / r.length : null;
+  }
+  const pg = a.ping; if (!pg) return null;
+  const v = { latency: pg.avg, jitter: pg.jitter, loss: pg.loss }[m];
+  return v == null ? null : v;
+}
+function syncMetricUI() {
+  const m = curMetric(), d = METRICS[m], act = m !== "rssi";
+  $("hmMetric").disabled = $("hmSource").value === "predicted";
+  $("targetBox").hidden = act; $("hmFilterBox").hidden = act; $("mTargetBox").hidden = !act;
+  if (act) { $("mTargetLbl").textContent = d.tl; if ($("mTarget").dataset.m !== m) { $("mTarget").value = d.target; $("mTarget").dataset.m = m; } }
+  const [l, h] = legendText(); $("legLo").textContent = l; $("legHi").textContent = h;
+}
 const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 const PL0 = { "2.4": 40, "5": 47, "6": 49 };
 
@@ -46,6 +86,8 @@ function predictAt(ap, x, y) {
 /* ------------------------------------------------------------ ค่าที่ใช้วาด heatmap */
 function filterVal() { return $("hmFilter").value; }
 function pointValue(p) {
+  const m = curMetric();
+  if (m !== "rssi") return activeValue(p, m);
   const f = filterVal();
   let aps = p.aps || [];
   if (f.startsWith("ssid:")) aps = aps.filter((a) => a.ssid === f.slice(5));
@@ -87,11 +129,20 @@ function computeHeatmap() {
   const { w, h } = state.plan;
   const step = Math.max(4, Math.round(Math.max(w, h) / 180));
   const gw = Math.ceil(w / step), gh = Math.ceil(h / step);
-  const src = $("hmSource").value, target = parseFloat($("target").value);
+  const src = $("hmSource").value, target = curTarget(), m = curMetric();
+  if (m === "rate") {   // ช่วงสีของ link rate ปรับตามค่าสูงสุดที่วัดได้ (Wi-Fi 5/6 ต่างกันมาก)
+    const mx = Math.max(0, ...state.points.map((p) => activeValue(p, "rate") || 0));
+    METRICS.rate.hi = Math.max(300, Math.ceil(mx / 100) * 100);
+  }
+  syncMetricUI();
   const c = document.createElement("canvas"); c.width = gw; c.height = gh;
   const g = c.getContext("2d"), img = g.createImageData(gw, gh);
   const pts = [];
-  if (src === "measured") state.points.forEach((p) => { const v = pointValue(p); pts.push({ x: p.x, y: p.y, v: v ?? -100 }); });
+  if (src === "measured") state.points.forEach((p) => {
+    const v = pointValue(p);
+    if (v != null) pts.push({ x: p.x, y: p.y, v });
+    else if (m === "rssi") pts.push({ x: p.x, y: p.y, v: -100 });   // วัดแล้วไม่พบ AP ที่เลือก = ไม่มีสัญญาณ
+  });
   if ((src === "measured" && !pts.length) || (src === "predicted" && !state.aps.length)) return { canvas: c, coverage: null, cells: 0 };
   const maxD = state.pxPerM ? 12 * state.pxPerM : Math.max(w, h) * 0.2;   // ไกลจากจุดวัดเกิน ~12 ม. ไม่ระบายสี
   let ok = 0, tot = 0;
@@ -112,9 +163,9 @@ function computeHeatmap() {
       alpha = dmin > maxD ? 0 : dmin > maxD * 0.6 ? 1 - (dmin - maxD * 0.6) / (maxD * 0.4) : 1;
     }
     if (v == null || alpha <= 0) continue;
-    const col = rssiColor(v), k = (j * gw + i) * 4;
+    const col = metricColor(v), k = (j * gw + i) * 4;
     img.data[k] = col[0]; img.data[k + 1] = col[1]; img.data[k + 2] = col[2]; img.data[k + 3] = Math.round(255 * alpha);
-    if (alpha > 0.5) { tot++; if (v >= target) ok++; }
+    if (alpha > 0.5) { tot++; if (passes(v, target)) ok++; }
   }
   g.putImageData(img, 0, 0);
   return { canvas: c, coverage: tot ? (100 * ok) / tot : null, cells: tot };
@@ -140,11 +191,11 @@ function renderScene(g, u, showHm = true) {
   state.points.forEach((p, i) => {
     const v = itemValue(p), r = 9 * u;
     g.beginPath(); g.arc(p.x, p.y, r, 0, 7);
-    g.fillStyle = v == null ? "#888" : rgb(rssiColor(v)); g.fill();
+    g.fillStyle = v == null ? "#888" : rgb(metricColor(v)); g.fill();
     g.lineWidth = (sel && sel.type === "point" && sel.id === p.id ? 3 : 1.5) * u;
     g.strokeStyle = sel && sel.type === "point" && sel.id === p.id ? "#1f6feb" : "#222"; g.stroke();
     g.fillStyle = "#000"; g.font = `bold ${9 * u}px sans-serif`; g.fillText(String(i + 1), p.x, p.y + 0.5 * u);
-    if (v != null) { g.font = `${10 * u}px sans-serif`; g.lineWidth = 3 * u; g.strokeStyle = "rgba(255,255,255,.9)"; g.strokeText(v.toFixed(0), p.x, p.y + 17 * u); g.fillStyle = "#111"; g.fillText(v.toFixed(0), p.x, p.y + 17 * u); }
+    if (v != null) { g.font = `${10 * u}px sans-serif`; g.lineWidth = 3 * u; g.strokeStyle = "rgba(255,255,255,.9)"; g.strokeText(fmtVal(v), p.x, p.y + 17 * u); g.fillStyle = "#111"; g.fillText(fmtVal(v), p.x, p.y + 17 * u); }
   });
   // AP ที่วางแผนไว้
   state.aps.forEach((a) => {
@@ -175,12 +226,13 @@ function redraw(recompute = false) {
 }
 
 function updateStats() {
-  const best = state.points.map((p) => { const v = pointValue(p); return v; }).filter((v) => v != null);
-  const target = parseFloat($("target").value), parts = [];
+  const best = state.points.map((p) => pointValue(p)).filter((v) => v != null);
+  const d = curDef(), target = curTarget(), parts = [], f = (v) => fmtVal(v);
   parts.push(`จุดวัด: <b>${state.points.length}</b> · AP ที่วางแผน: <b>${state.aps.length}</b>`);
-  if (best.length) parts.push(`RSSI (ต่ำสุด/เฉลี่ย/สูงสุด): <b>${Math.min(...best).toFixed(0)} / ${(best.reduce((a, b) => a + b, 0) / best.length).toFixed(0)} / ${Math.max(...best).toFixed(0)}</b> dBm`,
-    `จุดที่ผ่านเกณฑ์: <b>${best.filter((v) => v >= target).length}/${best.length}</b>`);
-  if (hm && hm.coverage != null) parts.push(`พื้นที่ครอบคลุม ≥ ${target} dBm: <b>${hm.coverage.toFixed(0)}%</b>`);
+  if (best.length) parts.push(`${d.name} (ต่ำสุด/เฉลี่ย/สูงสุด): <b>${f(Math.min(...best))} / ${f(best.reduce((a, b) => a + b, 0) / best.length)} / ${f(Math.max(...best))}</b> ${d.unit}`,
+    `จุดที่ผ่านเกณฑ์: <b>${best.filter((v) => passes(v, target)).length}/${best.length}</b>`);
+  else if (curMetric() !== "rssi" && state.points.length) parts.push("ยังไม่มีจุดที่วัดแบบ active (เปิดช่อง “วัดแบบ active” แล้ววัดจุดใหม่/สแกนจุดเดิมซ้ำ)");
+  if (hm && hm.coverage != null) parts.push(`พื้นที่ที่ ${d.higher ? "≥" : "≤"} ${target} ${d.unit}: <b>${hm.coverage.toFixed(0)}%</b>`);
   $("stats").innerHTML = parts.join("<br>");
 }
 
@@ -221,19 +273,46 @@ async function doScan(x, y) {
   const r = await api("/api/scan?samples=" + n, { method: "POST" });
   return (await r.json()).aps;
 }
+/* วัดแบบ active: link rate ของ AP ที่เชื่อมต่ออยู่ + ping (latency/jitter/loss) */
+function simulateActive(aps) {
+  const best = aps.length ? aps[0].rssi : -95, t = Math.max(0, Math.min(1, (best + 90) / 40)), nz = (k) => (Math.random() - 0.5) * k;
+  const lat = Math.max(1, 2 + (1 - t) * 40 + nz(2)), loss = Math.max(0, Math.min(100, Math.round(((1 - t) ** 2 * 12 + nz(1)) * 10) / 10));
+  const rate = Math.round(6 + t * 860 + nz(20));
+  return { simulated: true,
+    link: { ssid: aps[0] ? aps[0].ssid : null, bssid: aps[0] ? aps[0].bssid : null, rssi: best, rx_rate: rate, tx_rate: rate, channel: aps[0] ? aps[0].channel : null, band: aps[0] ? aps[0].band : null },
+    ping: { host: "simulated", sent: 8, received: 8, loss, min: +(lat * 0.8).toFixed(2), avg: +lat.toFixed(2), max: +(lat * 1.4).toFixed(2), jitter: +((1 - t) * 6 + Math.random()).toFixed(2) } };
+}
+async function doActive(aps) {
+  if (!$("activeOn").checked) return null;
+  if ($("scanMode").value === "sim") return simulateActive(aps);
+  const q = new URLSearchParams({ count: Math.max(2, Math.min(30, parseInt($("pingCount").value) || 8)), host: $("pingHost").value.trim() });
+  try { return await (await api("/api/active?" + q, { method: "POST" })).json(); }
+  catch (e) { toast("วัด active ไม่สำเร็จ (เก็บเฉพาะ RSSI): " + e.message, true); return null; }
+}
+async function measurePoint(x, y) {
+  const aps = await doScan(x, y);
+  if ($("activeOn").checked) $("busyText").textContent = "กำลังวัด link rate + ping…";
+  return { aps, active: await doActive(aps) };
+}
+function summary(r) {
+  let t = `พบ ${r.aps.length} AP` + (r.aps[0] ? ` · แรงสุด ${r.aps[0].rssi.toFixed(0)} dBm` : "");
+  if (r.active) { const a = r.active, rate = activeValue({ active: a }, "rate");
+    t += ` · ${rate != null ? rate.toFixed(0) + " Mbps" : "-"} · ping ${a.ping.avg != null ? a.ping.avg + " ms" : "ไม่ตอบ"} · loss ${a.ping.loss}%`; }
+  return t;
+}
 async function addPoint(x, y) {
   setBusy(true);
   try {
-    const aps = await doScan(x, y);
-    const p = { id: state.nextId++, x, y, label: "จุด " + (state.points.length + 1), aps, time: new Date().toISOString() };
+    const r = await measurePoint(x, y);
+    const p = { id: state.nextId++, x, y, label: "จุด " + (state.points.length + 1), aps: r.aps, active: r.active, time: new Date().toISOString() };
     state.points.push(p); sel = { type: "point", id: p.id };
-    toast(`วัดสำเร็จ: พบ ${aps.length} AP` + (aps[0] ? ` · แรงสุด ${aps[0].rssi.toFixed(0)} dBm` : ""));
+    toast("วัดสำเร็จ: " + summary(r));
   } catch (e) { toast("สแกนไม่สำเร็จ: " + e.message, true); }
   finally { setBusy(false); rebuildFilter(); renderSel(); redraw(true); }
 }
 async function rescan(p) {
   setBusy(true);
-  try { p.aps = await doScan(p.x, p.y); p.time = new Date().toISOString(); toast("สแกนใหม่แล้ว"); }
+  try { const r = await measurePoint(p.x, p.y); p.aps = r.aps; p.active = r.active; p.time = new Date().toISOString(); toast("วัดใหม่แล้ว: " + summary(r)); }
   catch (e) { toast("สแกนไม่สำเร็จ: " + e.message, true); }
   finally { setBusy(false); rebuildFilter(); renderSel(); redraw(true); }
 }
@@ -241,6 +320,13 @@ async function rescan(p) {
 /* ------------------------------------------------------------ รายการที่เลือก */
 const getSel = () => !sel ? null : sel.type === "point" ? state.points.find((p) => p.id === sel.id) : state.aps.find((a) => a.id === sel.id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function activeHtml(o) {
+  const a = o.active; if (!a) return '<div class="hint">ไม่มีข้อมูลวัด active ของจุดนี้</div>';
+  const L = a.link || {}, P = a.ping || {}, n = (v, u = "") => (v == null ? "-" : v + u);
+  return `<div class="hint"><b>Active${a.simulated ? " (จำลอง)" : ""}</b> · เชื่อมต่อ: ${esc(L.ssid || "-")} ${esc(L.bssid || "")}<br>
+    Link rate: rx ${n(L.rx_rate)} / tx ${n(L.tx_rate)} Mbps<br>
+    Ping ${esc(P.host || "")}: avg ${n(P.avg, " ms")} · jitter ${n(P.jitter, " ms")} · loss ${n(P.loss, "%")} (${P.received}/${P.sent})</div>`;
+}
 function renderSel() {
   const o = getSel(), panel = $("selPanel"), body = $("selBody");
   if (!o) { panel.hidden = true; return; }
@@ -249,6 +335,7 @@ function renderSel() {
     const rows = [...(o.aps || [])].sort((a, b) => b.rssi - a.rssi).slice(0, 25).map((a) =>
       `<tr><td>${esc(a.ssid || "(hidden)")}</td><td>${a.rssi.toFixed(0)}</td><td>${a.channel ?? "-"}</td><td>${a.band}</td></tr>`).join("");
     body.innerHTML = `<label>ชื่อจุด<input id="selLabel" type="text" value="${esc(o.label)}"></label>
+      ${activeHtml(o)}
       <div class="hint">ตำแหน่ง: ${state.pxPerM ? (o.x / state.pxPerM).toFixed(1) + ", " + (o.y / state.pxPerM).toFixed(1) + " ม." : "ยังไม่ตั้งสเกล"}</div>
       <table class="aps"><tr><th>SSID</th><th>dBm</th><th>Ch</th><th>GHz</th></tr>${rows || '<tr><td colspan=4>ไม่พบ AP</td></tr>'}</table>
       <div class="row"><button id="selRescan">สแกนจุดนี้ใหม่</button><button id="selDel" class="danger">ลบจุด</button></div>`;
@@ -372,8 +459,10 @@ function loadPlanImage(cb) {
 
 /* ------------------------------------------------------------ ตัวควบคุม heatmap */
 ["hmShow", "opacity"].forEach((id) => ($(id).oninput = () => redraw()));
-["hmFilter", "target", "plExp"].forEach((id) => ($(id).oninput = () => redraw(true)));
-$("hmSource").onchange = () => { rebuildFilter(); redraw(true); };
+["hmFilter", "target", "mTarget", "plExp"].forEach((id) => ($(id).oninput = () => redraw(true)));
+$("hmSource").onchange = () => { rebuildFilter(); syncMetricUI(); redraw(true); };
+$("hmMetric").onchange = () => { syncMetricUI(); redraw(true); };
+$("activeOn").onchange = () => { $("activeBox").hidden = !$("activeOn").checked; };
 $("scanMode").onchange = () => {
   $("scanNote").textContent = $("scanMode").value === "sim" ? "โหมดจำลองสร้างค่า RSSI จากโมเดลระยะทาง (ใช้ฝึก/ทดลองใช้งาน)" : "";
 };
@@ -424,8 +513,9 @@ function compositeImage() {
   const gr = g.createLinearGradient(bx, 0, bx + bw, 0);
   STOPS.forEach(([v, col]) => gr.addColorStop((v + 90) / 40, rgb(col)));
   g.fillStyle = gr; g.fillRect(bx, by, bw, bh);
-  g.fillStyle = "#222"; g.font = `${bar * 0.22}px sans-serif`; g.textBaseline = "top"; g.textAlign = "left"; g.fillText("-90 dBm", bx, by + bh + 3);
-  g.textAlign = "right"; g.fillText("-50 dBm", bx + bw, by + bh + 3);
+  const [lt, rt] = legendText();
+  g.fillStyle = "#222"; g.font = `${bar * 0.22}px sans-serif`; g.textBaseline = "top"; g.textAlign = "left"; g.fillText(`${curDef().name}: ${lt}`, bx, by + bh + 3);
+  g.textAlign = "right"; g.fillText(rt, bx + bw, by + bh + 3);
   return c;
 }
 $("btnPng").onclick = () => { try { compositeImage().toBlob((b) => download("heatmap.jpg", b), "image/jpeg", 0.92); } catch (e) { toast(e.message, true); } };
@@ -436,15 +526,18 @@ $("btnPdf").onclick = async () => {
     const d = serialize(), img = compositeImage().toDataURL("image/jpeg", 0.9);
     d.aps = state.aps.map((a) => ({ ...a, pos_m: state.pxPerM ? `${(a.x / state.pxPerM).toFixed(1)}, ${(a.y / state.pxPerM).toFixed(1)}` : "-" }));
     delete d.plan;
-    const r = await api("/api/report", { method: "POST", body: JSON.stringify({ project: d, image: img, lang: $("lang").value, target: parseFloat($("target").value), coverage: hm ? hm.coverage : null, surveyor: $("surveyor").value }) });
+    const r = await api("/api/report", { method: "POST", body: JSON.stringify({ project: d, image: img, lang: $("lang").value, target: parseFloat($("target").value), coverage: hm && curMetric() === "rssi" ? hm.coverage : null, surveyor: $("surveyor").value }) });
     download((d.name || "report") + ".pdf", await r.blob()); toast("สร้างรายงานแล้ว");
   } catch (e) { toast("สร้างรายงานไม่สำเร็จ: " + e.message, true); }
   finally { setBusy(false); }
 };
 $("btnCsv").onclick = () => {
   const q = (s) => '"' + String(s ?? "").replace(/"/g, '""') + '"', m = (v) => (state.pxPerM ? (v / state.pxPerM).toFixed(2) : "");
-  const rows = [["point", "label", "x_m", "y_m", "ssid", "bssid", "rssi_dbm", "channel", "band_ghz", "time"]];
-  state.points.forEach((p, i) => (p.aps || []).forEach((a) => rows.push([i + 1, p.label, m(p.x), m(p.y), a.ssid, a.bssid, a.rssi, a.channel ?? "", a.band, p.time || ""])));
+  const rows = [["point", "label", "x_m", "y_m", "ssid", "bssid", "rssi_dbm", "channel", "band_ghz", "time", "link_rx_mbps", "link_tx_mbps", "ping_avg_ms", "ping_jitter_ms", "ping_loss_pct", "ping_host"]];
+  state.points.forEach((p, i) => {
+    const L = (p.active && p.active.link) || {}, P = (p.active && p.active.ping) || {}, x = [L.rx_rate ?? "", L.tx_rate ?? "", P.avg ?? "", P.jitter ?? "", P.loss ?? "", P.host ?? ""];
+    (p.aps || []).forEach((a) => rows.push([i + 1, p.label, m(p.x), m(p.y), a.ssid, a.bssid, a.rssi, a.channel ?? "", a.band, p.time || "", ...x]));
+  });
   download("survey.csv", "﻿" + rows.map((r) => r.map(q).join(",")).join("\n"), "text/csv");
 };
 
@@ -455,6 +548,6 @@ $("btnCsv").onclick = () => {
     if (!info.scanner_ok) { $("scanMode").value = "sim"; $("scanNote").textContent = `เครื่องนี้สแกน Wi-Fi ไม่ได้ (${info.scanner}) — ใช้โหมดจำลองแทน`; }
     if (!info.thai_font) $("lang").querySelector('[value="th"]').textContent += " — ไม่พบฟอนต์ ใช้อังกฤษแทน";
   } catch (_) {}
-  rebuildFilter(); updateScaleInfo(); refreshList(); redraw();
+  rebuildFilter(); syncMetricUI(); updateScaleInfo(); refreshList(); redraw();
 })();
 window.__survey = { get state() { return state; } };   // สำหรับทดสอบ
